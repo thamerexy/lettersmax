@@ -70,7 +70,7 @@ export const subscribeToRoom = (roomCode: string, presence: PlayerPresence): Pro
     });
 
     let timeoutId: ReturnType<typeof setTimeout>;
-    channel.subscribe(async (status) => {
+    channel.subscribe(async (status: string) => {
       if (status === 'SUBSCRIBED') {
         clearTimeout(timeoutId);
         await channel.track(currentPresence!);
