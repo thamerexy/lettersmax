@@ -5,7 +5,6 @@ import { fetchAllQuestions } from '../services/questions';
 import { generateRoomCode, useRoomStore } from '../store/roomStore';
 import type { PlayerPresence } from '../store/roomStore';
 import { subscribeToRoom } from '../services/realtime';
-import { supabase } from '../lib/supabase';
 
 type Mode = 'select' | 'admin-passcode' | 'admin-loading' | 'player-join' | 'player-connecting';
 
@@ -34,27 +33,15 @@ export const Welcome: React.FC = () => {
     setError(null);
 
     try {
-      // 1. Validate Passcode against Supabase
-      const { data, error: dbError } = await supabase
-        .from('admin_passcodes')
-        .select('*')
-        .eq('code', passcode.trim())
-        .single();
+      // 1. Validate Passcode against GoDaddy API
+      const response = await fetch(`https://lettersmax.acamix.com/api/auth.php?code=${passcode.trim()}`);
+      const result = await response.json();
 
-      if (dbError || !data) {
-        throw new Error('رمز غير صحيح');
+      if (!result.success) {
+        throw new Error(result.error || 'رمز غير صحيح');
       }
 
-      // 2. Check Time Validity
-      const now = new Date();
-      const start = new Date(data.start_date);
-      const end = new Date(data.end_date);
-
-      if (now < start || now > end) {
-        throw new Error('الرمز منتهي الصلاحية أو غير مفعل بعد');
-      }
-
-      // 3. If Valid, Proceed to Create Room
+      // 2. If Valid, Proceed to Create Room
       const code = generateRoomCode();
       const clientId = useRoomStore.getState().clientId;
       const presence: PlayerPresence = { clientId, name: 'Admin', team: 'none', isAdmin: true };

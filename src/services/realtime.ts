@@ -1,132 +1,131 @@
-import { supabase } from '../lib/supabase';
 import { useRoomStore } from '../store/roomStore';
 import type { PlayerPresence, BuzzEvent, Team, GameBroadcast } from '../store/roomStore';
 
-type RealtimeChannel = ReturnType<typeof supabase.channel>;
+const API_BASE = 'https://lettersmax.acamix.com/api';
 
-let activeChannel: RealtimeChannel | null = null;
-let currentPresence: PlayerPresence | null = null;
-
-type BroadcastPayload =
-  | { type: 'BUZZ'; data: BuzzEvent }
-  | { type: 'TEAM_ASSIGN'; clientId: string; team: Team }
-  | { type: 'GAME_STATE'; data: GameBroadcast };
-
-const syncPresence = (channel: RealtimeChannel) => {
-  const raw = channel.presenceState();
-  const players: PlayerPresence[] = [];
-  for (const presences of Object.values(raw)) {
-    for (const p of (presences as unknown as PlayerPresence[])) {
-      if (!p.isAdmin) players.push(p);
-    }
-  }
-  useRoomStore.getState().setPlayers(players);
-};
+let syncInterval: ReturnType<typeof setInterval> | null = null;
+let playersInterval: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Connect to a Supabase Realtime channel for this room.
- * Uses Presence + Broadcast only — NO database tables needed.
+ * Connect to the GoDaddy PHP backend for this room using Polling.
  */
-export const subscribeToRoom = (roomCode: string, presence: PlayerPresence): Promise<void> => {
-  if (activeChannel) {
-    supabase.removeChannel(activeChannel);
-    activeChannel = null;
+export const subscribeToRoom = async (roomCode: string, presence: PlayerPresence): Promise<void> => {
+  stopPolling();
+
+  // 1. Initial Join
+  try {
+    // Register as a player in the DB
+    await fetch(`${API_BASE}/players.php?room_code=${roomCode}&action=join`, {
+      method: 'POST',
+      body: JSON.stringify(presence)
+    });
+
+    // If Admin, ensure room exists
+    if (presence.isAdmin) {
+      await fetch(`${API_BASE}/sync.php?room_code=${roomCode}&action=create&admin_id=${presence.clientId}`);
+    }
+
+    // 2. Start Polling
+    startPolling(roomCode, presence.isAdmin);
+    return Promise.resolve();
+  } catch (error) {
+    console.error("Failed to join room:", error);
+    return Promise.reject(error);
   }
-  currentPresence = { ...presence };
+};
 
-  return new Promise((resolve, reject) => {
-    const channel = supabase.channel(`game:${roomCode}`, {
-      config: {
-        presence: { key: presence.clientId },
-        broadcast: { self: false },
-      },
-    });
+const startPolling = (roomCode: string, isAdmin: boolean) => {
+  // Sync Players List (Common for both)
+  playersInterval = setInterval(async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/players.php?room_code=${roomCode}&action=list`);
+      const result = await resp.json();
+      if (result.success) {
+        useRoomStore.getState().setPlayers(result.data);
+      }
+    } catch (e) { console.error("Player sync error", e); }
+  }, 3000);
 
-    channel.on('presence', { event: 'sync' }, () => syncPresence(channel));
-    channel.on('presence', { event: 'join' }, () => syncPresence(channel));
-    channel.on('presence', { event: 'leave' }, () => syncPresence(channel));
-
-    channel.on('broadcast', { event: 'GAME' }, ({ payload }: { payload: BroadcastPayload }) => {
+  if (isAdmin) {
+    // Admin: Push state periodically
+    syncInterval = setInterval(async () => {
       const store = useRoomStore.getState();
-      if (payload.type === 'BUZZ') {
-        // ONLY the Admin processes individual buzz broadcasts to build the official queue.
-        // Players wait for the Admin's GAME_STATE sync.
-        if (store.isAdmin) {
-          store.addBuzz(payload.data);
-        }
-      } else if (payload.type === 'TEAM_ASSIGN') {
-        if (payload.clientId === store.clientId) {
-          store.setMyTeam(payload.team);
-          if (currentPresence) {
-            currentPresence = { ...currentPresence, team: payload.team };
-            channel.track(currentPresence);
-          }
-        }
-      } else if (payload.type === 'GAME_STATE') {
-        if (!store.isAdmin) {
-          store.applyGameBroadcast(payload.data);
-        }
-      }
-    });
+      const broadcastData: GameBroadcast = {
+        board: store.syncedBoard,
+        currentTurn: store.syncedTurn,
+        team1RoundsWon: store.syncedTeam1Rounds,
+        team2RoundsWon: store.syncedTeam2Rounds,
+        winner: store.winner,
+        matchWinner: store.matchWinner,
+        hideQuestionFromPlayers: store.hideQuestionFromPlayers,
+        questionActive: store.questionActive,
+        currentQuestion: store.currentQuestion,
+        answerRevealed: store.answerRevealed,
+        awardedTeam: store.awardedTeam,
+        revealedAnswer: store.revealedAnswer,
+        gamePhase: store.gamePhase,
+        buzzQueue: store.buzzQueue
+      };
 
-    let timeoutId: ReturnType<typeof setTimeout>;
-    channel.subscribe(async (status: string) => {
-      if (status === 'SUBSCRIBED') {
-        clearTimeout(timeoutId);
-        await channel.track(currentPresence!);
-        activeChannel = channel;
-        resolve();
-      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-        clearTimeout(timeoutId);
-        reject(new Error(`Connection error: ${status}`));
-      }
-    });
-    timeoutId = setTimeout(() => reject(new Error('Connection timed out')), 10000);
-  });
+      try {
+        await fetch(`${API_BASE}/sync.php?room_code=${roomCode}&action=update`, {
+          method: 'POST',
+          body: JSON.stringify(broadcastData)
+        });
+      } catch (e) { console.error("Admin sync push error", e); }
+    }, 2000);
+  } else {
+    // Player: Pull state periodically
+    syncInterval = setInterval(async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/sync.php?room_code=${roomCode}&action=get`);
+        const result = await resp.json();
+        if (result.success && result.data && result.data.game_state) {
+          const state = JSON.parse(result.data.game_state);
+          useRoomStore.getState().applyGameBroadcast(state);
+        }
+      } catch (e) { console.error("Player sync pull error", e); }
+    }, 1500);
+  }
+};
+
+const stopPolling = () => {
+  if (syncInterval) clearInterval(syncInterval);
+  if (playersInterval) clearInterval(playersInterval);
+  syncInterval = null;
+  playersInterval = null;
 };
 
 export const unsubscribeFromRoom = (): void => {
-  if (activeChannel) {
-    supabase.removeChannel(activeChannel);
-    activeChannel = null;
-    currentPresence = null;
+  stopPolling();
+  const store = useRoomStore.getState();
+  if (store.roomCode) {
+     fetch(`${API_BASE}/players.php?room_code=${store.roomCode}&action=leave&client_id=${store.clientId}`);
   }
 };
 
-/** Admin assigns a player to a team. Optimistic update included. */
+/** Admin assigns a player to a team. In polling, we just update local state and wait for push. */
 export const broadcastTeamAssign = async (clientId: string, team: Team): Promise<void> => {
-  if (!activeChannel) return;
-  await activeChannel.send({
-    type: 'broadcast', event: 'GAME',
-    payload: { type: 'TEAM_ASSIGN', clientId, team } as BroadcastPayload,
-  });
   const store = useRoomStore.getState();
   store.setPlayers(store.players.map(p => p.clientId === clientId ? { ...p, team } : p));
+  // The next syncInterval will push this to the DB via room_state
 };
 
-/** Admin broadcasts game state to all players. Also applies locally (self:false). */
+/** Admin broadcasts game state. In polling, we just update local state and wait for push. */
 export const broadcastGameState = async (data: GameBroadcast): Promise<void> => {
-  if (!activeChannel) return;
-  await activeChannel.send({
-    type: 'broadcast', event: 'GAME',
-    payload: { type: 'GAME_STATE', data } as BroadcastPayload,
-  });
-  // Admin applies locally
-  if (useRoomStore.getState().isAdmin) {
-    useRoomStore.getState().applyGameBroadcast(data);
-  }
+  const store = useRoomStore.getState();
+  store.applyGameBroadcast(data);
+  // The next syncInterval will push this to the DB
 };
 
-/** Player sends a buzz event. Also adds to local queue immediately. */
-export const broadcastBuzz = async (_roomCode: string, buzzData: BuzzEvent): Promise<void> => {
-  if (!activeChannel) return;
-  await activeChannel.send({
-    type: 'broadcast', event: 'GAME',
-    payload: { type: 'BUZZ', data: buzzData } as BroadcastPayload,
-  });
-  // NOTE: Players no longer add buzz locally. 
-  // They wait for the Admin's official sorted sync.
-  if (useRoomStore.getState().isAdmin) {
-    useRoomStore.getState().addBuzz(buzzData);
+/** Player sends a buzz event. */
+export const broadcastBuzz = async (roomCode: string, buzzData: BuzzEvent): Promise<void> => {
+  try {
+    await fetch(`${API_BASE}/buzz.php?room_code=${roomCode}&action=send`, {
+      method: 'POST',
+      body: JSON.stringify(buzzData)
+    });
+  } catch (e) {
+    console.error("Buzz send error", e);
   }
 };

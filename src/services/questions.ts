@@ -1,5 +1,3 @@
-import { supabase } from '../lib/supabase';
-
 export interface QuestionData {
   id?: number;
   letter: string;
@@ -7,27 +5,26 @@ export interface QuestionData {
   answer: string;
 }
 
-// In-memory cache to store questions fetched from Supabase
+// In-memory cache to store questions fetched from GoDaddy
 let questionsCache: QuestionData[] = [];
 const usedQuestions = new Set<string>();
 
 /**
- * Fetches all questions from Supabase and caches them locally
+ * Fetches all questions from GoDaddy API and caches them locally
  * Call this when the app first starts (Welcome Screen)
  */
 export const fetchAllQuestions = async (): Promise<boolean> => {
   try {
-    const { data, error } = await supabase
-      .from('questions')
-      .select('*');
+    const response = await fetch('https://lettersmax.acamix.com/api/questions.php');
+    const result = await response.json();
       
-    if (error) {
-      console.error("Error fetching questions from Supabase:", error);
+    if (!result.success) {
+      console.error("Error fetching questions from GoDaddy:", result.error);
       return false;
     }
     
-    if (data) {
-      questionsCache = data as QuestionData[];
+    if (result.data) {
+      questionsCache = result.data as QuestionData[];
       console.log(`Loaded ${questionsCache.length} questions from database.`);
       return true;
     }
