@@ -1,9 +1,9 @@
 <?php
 // Database configuration
 define('DB_HOST', 'localhost');
-define('DB_USER', 'thamerex_user'); // Replace with your MySQL username
-define('DB_PASS', 'thamerex_pass'); // Replace with your MySQL password
-define('DB_NAME', 'thamerex_letters'); // Replace with your MySQL database name
+define('DB_USER', 'thamerex');
+define('DB_PASS', 'Tham3r99??!!??');
+define('DB_NAME', 'cp1234_lettersmax');
 
 // Error reporting for debugging
 error_reporting(E_ALL);
